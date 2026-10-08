@@ -337,8 +337,9 @@ testcontainers_source="$(<"${PLUGIN_DIR}/scripts/run-testcontainers.sh")"
 metrics_source="$(<"${PLUGIN_DIR}/scripts/collect-resource-metrics.ps1")"
 assert_contains "TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1" "$testcontainers_source" "host override"
 assert_contains "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock" "$testcontainers_source" "Ryuk guest socket"
-assert_contains 'exec env "${COMMAND_ENV[@]}" "$@"' "$testcontainers_source" "Testcontainers environment crosses the MSYS process boundary"
-assert_contains 'env "${COMMAND_ENV[@]}" "$@"' "$testcontainers_source" "metrics mode runs the command before producing its summary"
+assert_contains 'HOST_ENV_BIN="$(command -v env)"' "$testcontainers_source" "capture the owning Bash environment launcher before PATH changes"
+assert_contains 'exec "$HOST_ENV_BIN" "${COMMAND_ENV[@]}" "$@"' "$testcontainers_source" "Testcontainers environment crosses the MSYS process boundary"
+assert_contains '"$HOST_ENV_BIN" "${COMMAND_ENV[@]}" "$@"' "$testcontainers_source" "metrics mode runs the command before producing its summary"
 assert_contains 'trap finish_resource_metrics EXIT' "$testcontainers_source" "metrics finalize after successful or failed commands"
 assert_contains 'exit "$command_status"' "$testcontainers_source" "metrics preserve the command exit code"
 assert_contains 'metrics/latest.json' "$testcontainers_source" "metrics overwrite the stable latest report"
@@ -353,7 +354,7 @@ assert_contains '"TESTCONTAINERS_PULL_TIMEOUT=${TESTCONTAINERS_PULL_TIMEOUT_VALU
 assert_not_contains "TESTCONTAINERS_RYUK_DISABLED=true" "$testcontainers_source" "Ryuk remains enabled"
 assert_contains "TESTCONTAINERS_PULL_PAUSE_TIMEOUT=300" "$(<"${PLUGIN_DIR}/profiles/dev.profile")" "default profile tolerates slow TCG layer extraction"
 assert_contains "TESTCONTAINERS_PULL_TIMEOUT=1800" "$(<"${PLUGIN_DIR}/profiles/dev.profile")" "default profile allows large image pulls"
-assert_contains "TESTCONTAINERS_RESOURCE_METRICS=true" "$(<"${PLUGIN_DIR}/profiles/dev.profile")" "default profile enables resource metrics"
+assert_contains "TESTCONTAINERS_RESOURCE_METRICS=auto" "$(<"${PLUGIN_DIR}/profiles/dev.profile")" "default profile selects platform-appropriate metrics"
 assert_contains "TESTCONTAINERS_RESOURCE_METRICS_INTERVAL=1" "$(<"${PLUGIN_DIR}/profiles/dev.profile")" "default profile samples resource metrics each second"
 
 QEMU_ACCELERATOR=""
@@ -374,11 +375,36 @@ probe_whpx() { return 1; }
 configure_qemu_acceleration "${MOCK_DIR}/bin/qemu-system-x86_64"
 assert_equals "tcg" "$QEMU_ACCELERATOR" "automatic selection falls back when WHPX probe fails"
 
+is_windows() { return 1; }
+platform_tag() { echo linux; }
+probe_kvm() { return 0; }
+VM_ACCELERATOR=auto
+configure_qemu_acceleration "${MOCK_DIR}/bin/qemu-system-x86_64"
+assert_equals "kvm" "$QEMU_ACCELERATOR" "Linux auto selects usable KVM"
+assert_equals "-accel kvm -cpu host" "${QEMU_ACCEL_ARGS[*]}" "KVM uses host CPU"
+VM_ACCELERATOR=kvm
+configure_qemu_acceleration "${MOCK_DIR}/bin/qemu-system-x86_64"
+assert_equals "kvm" "$QEMU_ACCELERATOR" "explicit KVM selection"
+probe_kvm() { return 1; }
+VM_ACCELERATOR=auto
+configure_qemu_acceleration "${MOCK_DIR}/bin/qemu-system-x86_64"
+assert_equals "tcg" "$QEMU_ACCELERATOR" "Linux auto falls back when KVM is inaccessible"
+VM_ACCELERATOR=kvm
+if configure_qemu_acceleration "${MOCK_DIR}/bin/qemu-system-x86_64" >/dev/null 2>"${MOCK_DIR}/kvm-unavailable"; then
+    fail "Explicit unavailable KVM must fail"
+fi
+assert_contains "/dev/kvm" "$(<"${MOCK_DIR}/kvm-unavailable")" "KVM error identifies required device access"
+platform_tag() { echo win; }
+if configure_qemu_acceleration "${MOCK_DIR}/bin/qemu-system-x86_64" >/dev/null 2>"${MOCK_DIR}/kvm-platform"; then
+    fail "Explicit KVM must reject non-Linux hosts"
+fi
+assert_contains "requires a Linux host" "$(<"${MOCK_DIR}/kvm-platform")" "KVM platform error"
+
 VM_ACCELERATOR=invalid
 if configure_qemu_acceleration "${MOCK_DIR}/bin/qemu-system-x86_64" >/dev/null 2>"${MOCK_DIR}/invalid-accelerator"; then
     fail "Invalid accelerator should fail"
 fi
-assert_contains "VM_ACCELERATOR must be auto, whpx, or tcg" "$(<"${MOCK_DIR}/invalid-accelerator")" "invalid accelerator error"
+assert_contains "VM_ACCELERATOR must be auto, kvm, whpx, or tcg" "$(<"${MOCK_DIR}/invalid-accelerator")" "invalid accelerator error"
 
 if bash "${PLUGIN_DIR}/scripts/run-testcontainers.sh" >/dev/null 2>"${MOCK_DIR}/usage"; then
     fail "Testcontainers command required"
@@ -397,7 +423,7 @@ PROFILE
 if bash "${PLUGIN_DIR}/scripts/run-testcontainers.sh" --profile "${MOCK_DIR}/invalid-metrics.profile" -- true >/dev/null 2>"${MOCK_DIR}/invalid-metrics"; then
     fail "Invalid metrics switch should fail"
 else
-    assert_contains "TESTCONTAINERS_RESOURCE_METRICS must be true or false" "$(<"${MOCK_DIR}/invalid-metrics")" "invalid metrics switch error"
+    assert_contains "TESTCONTAINERS_RESOURCE_METRICS must be auto, true, or false" "$(<"${MOCK_DIR}/invalid-metrics")" "invalid metrics switch error"
 fi
 
 cat > "${MOCK_DIR}/invalid-metrics-interval.profile" <<'PROFILE'

@@ -14,7 +14,7 @@
 #     TEMP/TMP directory alignment, socket path exclusion)
 #
 # Resource metrics:
-#   When TESTCONTAINERS_RESOURCE_METRICS=true (default), the script spawns a
+#   When TESTCONTAINERS_RESOURCE_METRICS=auto (default), the script spawns a
 #   PowerShell process that periodically samples CPU/memory usage of the host,
 #   QEMU process, and guest. The results are written to a JSON report file.
 #   This is only available on Windows.
@@ -24,6 +24,11 @@
 # Example: run-testcontainers.sh -- ./gradlew test
 #
 set -euo pipefail
+
+# Keep the environment launcher from this Bash installation. vm-utils may add
+# another MSYS2 installation to PATH; using its env.exe under Git Bash can
+# make Windows OpenSSH exit 255 before initialization (even for ssh -V).
+HOST_ENV_BIN="$(command -v env)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=vm-utils.sh
@@ -57,7 +62,7 @@ validate_port_range "$TESTCONTAINERS_PORT_START" "$TESTCONTAINERS_PORT_END"
 # because TCG (software emulation) is slow and large image layers take time.
 TESTCONTAINERS_PULL_PAUSE_TIMEOUT_VALUE="${TESTCONTAINERS_PULL_PAUSE_TIMEOUT:-300}"
 TESTCONTAINERS_PULL_TIMEOUT_VALUE="${TESTCONTAINERS_PULL_TIMEOUT:-1800}"
-TESTCONTAINERS_RESOURCE_METRICS_VALUE="${TESTCONTAINERS_RESOURCE_METRICS:-true}"
+TESTCONTAINERS_RESOURCE_METRICS_VALUE="${TESTCONTAINERS_RESOURCE_METRICS:-auto}"
 TESTCONTAINERS_RESOURCE_METRICS_INTERVAL_VALUE="${TESTCONTAINERS_RESOURCE_METRICS_INTERVAL:-1}"
 # --- Validate timeout and metrics configuration ---
 # All timeouts must be positive integers; metrics interval must be 1–60.
@@ -69,9 +74,13 @@ for timeout_key in TESTCONTAINERS_PULL_PAUSE_TIMEOUT_VALUE TESTCONTAINERS_PULL_T
     fi
 done
 case "$TESTCONTAINERS_RESOURCE_METRICS_VALUE" in
+    auto)
+        if is_windows; then TESTCONTAINERS_RESOURCE_METRICS_VALUE=true
+        else TESTCONTAINERS_RESOURCE_METRICS_VALUE=false; fi
+        ;;
     true|false) ;;
     *)
-        echo "Error: TESTCONTAINERS_RESOURCE_METRICS must be true or false (got '${TESTCONTAINERS_RESOURCE_METRICS_VALUE}')." >&2
+        echo "Error: TESTCONTAINERS_RESOURCE_METRICS must be auto, true, or false (got '${TESTCONTAINERS_RESOURCE_METRICS_VALUE}')." >&2
         exit 1
         ;;
 esac
@@ -87,6 +96,13 @@ if ! vm_is_running; then
     exit 1
 fi
 wait_for_docker_api 30
+DOCKER_PROXY_DIR="$(docker_proxy_dir)"
+DOCKER_PROXY_NAME=docker
+is_windows && DOCKER_PROXY_NAME=docker.exe
+if [ ! -x "$DOCKER_PROXY_DIR/$DOCKER_PROXY_NAME" ]; then
+    echo "Error: Docker proxy missing; run scripts/build-docker-proxy.sh first." >&2
+    exit 1
+fi
 
 # --- Environment setup ---
 # Configure the Docker client to talk to the guest's Docker daemon via port forwarding.
@@ -102,6 +118,10 @@ unset DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_SOCKET
 unset TESTCONTAINERS_RYUK_DISABLED
 
 COMMAND_ENV=(
+    "PATH=${DOCKER_PROXY_DIR}:${PATH}"
+    "QEMU_DOCKER_SSH_PORT=$(ssh_port)"
+    "QEMU_DOCKER_SSH_KEY=$(qemu_native_path "$SSH_KEY")"
+    "QEMU_DOCKER_SSH_HOST=${SSH_HOST:-127.0.0.1}"
     "DOCKER_HOST=${DOCKER_HOST_VALUE}"
     "TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1"
     "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock"
@@ -148,7 +168,7 @@ echo "Running Testcontainers command: $*" >&2
 # If resource metrics are disabled, simply exec the command with the configured environment.
 # The env command ensures the variables are passed through the MSYS-to-native process boundary.
 if [ "$TESTCONTAINERS_RESOURCE_METRICS_VALUE" = "false" ]; then
-    exec env "${COMMAND_ENV[@]}" "$@"
+    exec "$HOST_ENV_BIN" "${COMMAND_ENV[@]}" "$@"
 fi
 
 # --- Resource metrics (Windows only) ---
@@ -211,4 +231,4 @@ trap finish_resource_metrics EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-env "${COMMAND_ENV[@]}" "$@"
+"$HOST_ENV_BIN" "${COMMAND_ENV[@]}" "$@"
