@@ -58,6 +58,8 @@ For requests to view VM state, service health, or containers, call `qemu_docker_
 
 Without MCP Apps support, run `scripts/status.py` with Python 3 and summarize its JSON snapshot. Read `QEMU_STATUS_PROFILE` for a custom profile and `QEMU_ALPINE_BASE_DIR` for existing state overrides; do not invent a running state from the ready marker. Unknown probes, unavailable lists, and stale PID files must be reported as such. SSH health means a banner was received, not successful authentication. Resource counts and accelerator policy are profile configuration, not measured utilization. The separate accelerator field is read from the running process when available.
 
+The separate `resources` snapshot reports live host-system, QEMU-process, and Alpine-guest CPU/memory; each container's `resources` reports CPU/memory when running. These are refresh samples, not the test wrapper's metrics report. Host/QEMU CPU is normalized over host logical CPUs; guest CPU is normalized over guest CPUs; container CPU uses 100% per core. Linux host-system values reflect the kernel system view, not an outer container's cgroup allocation. Preserve unavailable and not-running states and null CPU baselines. Guest sampling uses only the existing key and fixed read-only `/proc` commands over loopback SSH. Never create keys or install guest tools to populate the panel. The MCP runtime includes psutil; plain Python needs it for host/process samples. Container probes are bounded to 32 running containers with eight workers.
+
 - `scripts/status.py`: read-only local status collection.
 - `scripts/status-server.py`: stdio MCP App server with a thread entrypoint.
 - `templates/status-panel.html`: bundled dashboard, rebuilt from `ui/`.
@@ -84,8 +86,10 @@ Daily testing:
 
 After starting the VM, run `scripts/build-docker-proxy.sh` (optionally with `--profile <path>`).
 It uses existing SSH to transfer source, installs Go in Alpine if missing, runs native guest
-tests, cross-compiles Windows amd64 with CGO disabled, and downloads the executable over SSH.
-The host needs no Go installation. Go and its caches remain on the persistent guest disk;
+tests, builds for Windows amd64 or Linux amd64/arm64 according to the environment running
+the script with CGO disabled, and downloads the executable over SSH. Run both compilation
+and tests on Windows or inside the same outer Linux container as QEMU; no Go installation
+is needed in that environment. Go and its caches remain on the persistent guest disk;
 temporary source and binaries are cleaned up after success or failure. `run-testcontainers.sh` places the resulting
 native proxy on PATH and supplies SSH settings. Set `QEMU_DOCKER_PROXY_DIR` consistently in both
 scripts to override the helper directory. Restart existing Gradle daemons if their executable
@@ -96,7 +100,9 @@ including ordered exceptions and Dockerfile-specific ignore files. It streams th
 over SSH to guest `docker buildx build --load`. Non-build commands execute through SSH without
 context copying; host-path bind mounts and `docker cp` are not translated. Build secrets, SSH
 mounts and named host contexts require explicit transport support and are rejected. Keep secrets
-excluded by Docker ignore rules. The skill never selects project service names or Docker targets.
+excluded by Docker ignore rules. On Windows, archive permissions add execute bits and remove
+group/world write bits; in Linux containers, source permission bits are preserved, so ensure
+scripts already have their required execute bits. The skill never selects project service names or Docker targets.
 
 When project files must exist inside the guest, sync them separately and then run the project's own build or test command:
 
@@ -112,9 +118,9 @@ The start script returns after SSH and the Docker API are ready. The test wrappe
 - `TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1`
 - `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock`
 
-It unsets TLS variables and `TESTCONTAINERS_RYUK_DISABLED`, runs the test command, then reports resource averages and peaks without changing the command's exit code.
+It unsets TLS variables and `TESTCONTAINERS_RYUK_DISABLED` and preserves the test command's exit code. With `auto` metrics, Windows collects and reports resource averages and peaks; Linux runs without the PowerShell collector and does not update the metrics report.
 
-Keep the environment launcher from the Bash installation that started the wrapper.
+On Windows, keep the environment launcher from the Bash installation that started the wrapper.
 Do not replace it with another MSYS2 installation's `env.exe` after changing `PATH`:
 native Windows SSH can exit 255 before initialization when runtimes are mixed.
 
@@ -153,4 +159,7 @@ produces an error: confirm no compiler or transfer remains before removing the r
 lock directory. Do not remove another running build's lock.
 
 The default proxy directory is user-wide: `~/.local/share/me/docker-proxy`.
-Every project uses the same executable; the wrapper supplies that run's VM SSH settings.
+Windows uses `docker.exe`; Linux containers use `docker`. Every project under the same
+user in that environment uses the same executable; the wrapper supplies that run's VM SSH settings.
+In Linux containers, the directory belongs to the container user. Persist it or rebuild
+the helper after replacing the outer container; the persistent VM disk alone does not retain it.
